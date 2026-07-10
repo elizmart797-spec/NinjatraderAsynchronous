@@ -1,0 +1,86 @@
+private int _activeRequestBarIndex = -1; // Track which bar started the request
+
+// Inside PHASE 1 (Request Trigger)
+_activeRequestBarIndex = CurrentBar; 
+
+// Inside PHASE 3 (Reunion)
+if (_isPipelineRunning && _aiTask != null && _aiTask.IsCompleted)
+{
+    // Validate: Is this result still relevant to the current market?
+    if (_activeRequestBarIndex == CurrentBar) 
+    {
+        ExecuteScalp7Trade(_aiTask.Result);
+    }
+    else 
+    {
+        Print("Stale insight discarded. Bar mismatch.");
+    }
+    ResetPipeline();
+}
+
+
+2. The Circuit Breaker Pattern
+If your API is returning errors (500s or Rate Limits), repeatedly slamming it with requests will likely get your IP banned or crash your local logic. A Circuit Breaker "trips" the circuit when errors exceed a threshold, forcing the strategy into "Safe Mode" for a cooling-off period.
+C#
+
+
+private int _failureCount = 0;
+private readonly int _failureThreshold = 3; // Trip circuit after 3 fails
+private DateTime _circuitTripTime;
+private bool _isCircuitOpen = false;
+
+// Inside PerformAsyncWorkflow (The Background Task)
+private string SendApiRequest(string context)
+{
+    try 
+    {
+        // Network call...
+        return api.GetResponse();
+    }
+    catch (Exception ex)
+    {
+        _failureCount++;
+        if (_failureCount >= _failureThreshold)
+        {
+            _isCircuitOpen = true;
+            _circuitTripTime = Core.Globals.Now;
+        }
+        throw; // Propagate the error so the main thread knows it failed
+    }
+}
+
+
+The Combined "Safe-Mode" Pipeline
+Here is how the OnBarUpdate loop looks with the Circuit Breaker integrated:
+C#
+
+
+protected override void OnBarUpdate()
+{
+    // CIRCUIT BREAKER CHECK
+    if (_isCircuitOpen)
+    {
+        // Stay in "Safe Mode" for 60 seconds
+        if ((Core.Globals.Now - _circuitTripTime).TotalSeconds > 60)
+            _isCircuitOpen = false; // Reset circuit
+        else
+            return; // Exit: Strategy operates in "Safe Mode" (no AI)
+    }
+
+    // PHASE 1: Kick off
+    if (!_isPipelineRunning && _chromaTask == null)
+    {
+        _pipelineStartTime = Core.Globals.Now;
+        _activeRequestBarIndex = CurrentBar; // Snap the context
+        _isPipelineRunning = true;
+        _chromaTask = Task.Run(() => GetHistoricalContextFromChroma());
+    }
+
+    // ... (Phases 2 & 3 stay similar, but wrap result access in Try/Catch)
+    try {
+        // reunion logic
+    }
+    catch {
+        // Increment _failureCount and reset
+    }
+}

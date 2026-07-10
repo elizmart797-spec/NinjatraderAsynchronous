@@ -1,0 +1,44 @@
+public class AIInsightResult {
+    public string Context { get; set; }
+    public string ApiResponse { get; set; }
+    public bool IsComplete => Context != null && ApiResponse != null;
+}
+
+// Inside your NinjaScript Strategy
+private AIInsightResult _pendingResult = null;
+private bool _isProcessing = false;
+
+protected override void OnBarUpdate() {
+
+    // 1. Trigger the background work if idle
+    if (!_isProcessing && _pendingResult == null) {
+        _isProcessing = true;
+        // Fire and forget, but keep track of it
+        Task.Run(() => PerformAsyncWorkflow()); 
+    }
+
+    // 2. The "Resume" Check: Poll the shared variable
+    if (_pendingResult != null && _pendingResult.IsComplete)
+    {
+        // Proceed with Scalp7 trade logic using _pendingResult
+        ExecuteTrade(_pendingResult);
+        
+        // Reset
+        _pendingResult = null;
+        _isProcessing = false;
+    }
+}
+
+private void PerformAsyncWorkflow()
+{
+    // These run on a thread-pool thread, NOT the UI thread
+    var context = GetHistoricalContextFromChroma(); // Your local DB call
+    var response = SendApiRequest();                // Your network call
+    
+    // Once finished, update the shared variable
+    _pendingResult = new AIInsightResult 
+    { 
+        Context = context, 
+        ApiResponse = response 
+    };
+}

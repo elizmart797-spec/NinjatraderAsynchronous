@@ -1,0 +1,53 @@
+private Task<string> _chromaTask;
+private Task<string> _aiTask;
+private DateTime _pipelineStartTime;
+private readonly TimeSpan _timeoutLimit = TimeSpan.FromMilliseconds(400);
+private bool _isPipelineRunning = false;
+
+protected override void OnBarUpdate()
+{
+    // PHASE 1: Kick off
+    if (!_isPipelineRunning && _chromaTask == null)
+    {
+        _pipelineStartTime = Core.Globals.Now;
+        _isPipelineRunning = true;
+        _chromaTask = Task.Run(() => GetHistoricalContextFromChroma());
+    }
+
+    // CHECK FOR TIMEOUTS (Applied to both phases)
+    if (_isPipelineRunning && (Core.Globals.Now - _pipelineStartTime) > _timeoutLimit)
+    {
+        HandleTimeoutFallback();
+        return;
+    }
+
+    // PHASE 2: Wait for Chroma
+    if (_isPipelineRunning && _chromaTask != null && _chromaTask.IsCompleted && _aiTask == null)
+    {
+        _aiTask = Task.Run(() => SendApiRequest(_chromaTask.Result));
+    }
+
+    // PHASE 3: Reunion
+    if (_isPipelineRunning && _aiTask != null && _aiTask.IsCompleted)
+    {
+        ExecuteScalp7Trade(_aiTask.Result);
+        ResetPipeline();
+    }
+}
+
+private void HandleTimeoutFallback()
+{
+    Print("Pipeline timed out! Executing fallback strategy.");
+    
+    // Fallback: E.g., trade based on simple indicator math instead of AI
+    ExecuteSimpleFallbackTrade(); 
+    
+    ResetPipeline();
+}
+
+private void ResetPipeline()
+{
+    _chromaTask = null;
+    _aiTask = null;
+    _isPipelineRunning = false;
+}

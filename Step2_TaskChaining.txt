@@ -1,0 +1,37 @@
+private Task<string> _chromaTask;
+private Task<string> _aiTask;
+private bool _isPipelineRunning = false;
+
+protected override void OnBarUpdate()
+{
+    // PHASE 1: Kick off the dependency
+    if (!_isPipelineRunning && _chromaTask == null && _aiTask == null)
+    {
+        _isPipelineRunning = true;
+        _chromaTask = Task.Run(() => GetHistoricalContextFromChroma());
+    }
+
+    // PHASE 2: Wait for Chroma, then trigger AI
+    if (_isPipelineRunning && _chromaTask != null && _chromaTask.IsCompleted && _aiTask == null)
+    {
+        // Capture the result of the first task
+        string contextResult = _chromaTask.Result; 
+        
+        // Trigger the second task using the result of the first
+        _aiTask = Task.Run(() => SendApiRequest(contextResult)); 
+    }
+
+    // PHASE 3: Reunion (The final result)
+    if (_isPipelineRunning && _aiTask != null && _aiTask.IsCompleted)
+    {
+        string aiResponse = _aiTask.Result;
+        
+        // Execute Scalp7 logic
+        ExecuteScalp7Trade(aiResponse);
+
+        // Reset Pipeline
+        _chromaTask = null;
+        _aiTask = null;
+        _isPipelineRunning = false;
+    }
+}

@@ -1,0 +1,155 @@
+#region Using declarations
+using System;
+using System.Threading.Tasks;
+using NinjaTrader.Cbi;
+using NinjaTrader.Data;
+using NinjaTrader.NinjaScript;
+using NinjaTrader.NinjaScript.Strategies;
+#endregion
+
+namespace NinjaTrader.NinjaScript.Strategies
+{
+    public class Scalp7UnifiedAIEngine : StrategyFrameworkBase
+    {
+        // Pipeline & Task Tracking
+        private Task<string> _chromaTask;
+        private Task<string> _aiTask;
+        private bool _isPipelineRunning = false;
+        private DateTime _pipelineStartTime;
+        private readonly TimeSpan _timeoutLimit = TimeSpan.FromMilliseconds(400);
+        private int _activeRequestBarIndex = -1;
+
+        // Circuit Breaker State
+        private int _failureCount = 0;
+        private readonly int _failureThreshold = 3;
+        private DateTime _circuitTripTime;
+        private bool _isCircuitOpen = false;
+
+        protected override void OnBarUpdate()
+        {
+            // 0. Circuit Breaker Safety Check (Safe Mode Cooling-off)
+            if (_isCircuitOpen)
+            {
+                if ((Core.Globals.Now - _circuitTripTime).TotalSeconds > 60)
+                {
+                    _isCircuitOpen = false;
+                    _failureCount = 0;
+                }
+                else
+                {
+                    return; // Operating in Safe Mode (Indicator fallback only)
+                }
+            }
+
+            // Skip historical or incomplete data bars
+            if (State == State.Historical || CurrentBar < BarsRequiredToTrade) return;
+
+            // PHASE 1: Kick off the Chroma vector context retrieval
+            if (!_isPipelineRunning && _chromaTask == null && _aiTask == null)
+            {
+                _pipelineStartTime = Core.Globals.Now;
+                _activeRequestBarIndex = CurrentBar;    
+                _isPipelineRunning = true;            
+                
+                _chromaTask = Task.Run(() => GetHistoricalContextFromChroma());
+            }
+
+            // Global Timeout Guardrail (Evaluated across active phases)
+            if (_isPipelineRunning && (Core.Globals.Now - _pipelineStartTime) > _timeoutLimit)
+            {
+                HandleTimeoutFallback();
+                return;
+            }
+
+            // PHASE 2: Wait for Chroma completion, then chain the API request
+            if (_isPipelineRunning && _chromaTask != null && _chromaTask.IsCompleted && _aiTask == null)
+            {
+                string contextResult = _chromaTask.Result;
+                
+                // Wrap second phase execution to trip circuit on immediate failures
+                try 
+                {
+                    _aiTask = Task.Run(() => SendApiRequestWithCircuitBreaker(contextResult));
+                }
+                catch (Exception)
+                {
+                    RecordFailure();
+                    ResetPipeline();
+                    return;
+                }
+            }
+
+            // PHASE 3: Reunion, Freshness Validation, and Trade Execution
+            if (_isPipelineRunning && _aiTask != null && _aiTask.IsCompleted)
+            {
+                if (_aiTask.IsFaulted)
+                {
+                    RecordFailure();
+                }
+                else
+                {
+                    // Freshness Check: Discard if the bar index drifted during async network IO
+                    if (_activeRequestBarIndex == CurrentBar)
+                    {
+                        string aiResponse = _aiTask.Result;
+                        ExecuteScalp7Trade(aiResponse);   
+                    }
+                    else
+                    {
+                        Print("Stale insight discarded. Bar mismatch.");
+                    }
+                }
+
+                ResetPipeline();
+            }
+        }
+
+        private string GetHistoricalContextFromChroma()
+        {
+            // Placeholder for local vector database query logic
+            return "Historical regime matched successfully.";
+        }
+
+        private string SendApiRequestWithCircuitBreaker(string context)
+        {
+            try
+            {
+                // Placeholder for external REST API call
+                return "{ \"strategy\": { \"action\": \"BUY\" } }";
+            }
+            catch (Exception)
+            {
+                RecordFailure();
+                throw;
+            }
+        }
+
+        private void RecordFailure()
+        {
+            _failureCount++;
+            if (_failureCount >= _failureThreshold)
+            {
+                _isCircuitOpen = true;
+                _circuitTripTime = Core.Globals.Now;
+                Print("Circuit breaker tripped! Entering Safe Mode for 60 seconds.");
+            }
+        }
+
+        private void HandleTimeoutFallback()
+        {
+            Print("Pipeline timed out (400ms exceeded)! Executing fallback strategy.");
+            ExecuteSimpleFallbackTrade();
+            ResetPipeline();
+        }
+
+        private void ResetPipeline()
+        {
+            _chromaTask = null;
+            _aiTask = null;
+            _isPipelineRunning = false;
+        }
+
+        private void ExecuteScalp7Trade(string response) { /* Core AI Execution */ }
+        private void ExecuteSimpleFallbackTrade() { /* Indicator Math Fallback */ }
+    }
+}
