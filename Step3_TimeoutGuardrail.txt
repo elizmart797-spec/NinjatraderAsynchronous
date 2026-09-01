@@ -6,7 +6,7 @@ private bool _isPipelineRunning = false;
 
 protected override void OnBarUpdate()
 {
-    // PHASE 1: Kick off
+    // PHASE 1: Kick off Chroma retrieval
     if (!_isPipelineRunning && _chromaTask == null)
     {
         _pipelineStartTime = Core.Globals.Now;
@@ -14,22 +14,43 @@ protected override void OnBarUpdate()
         _chromaTask = Task.Run(() => GetHistoricalContextFromChroma());
     }
 
-    // CHECK FOR TIMEOUTS (Applied to both phases)
+    // UNIFIED CHECK FOR TIMEOUTS (Enforces 400ms cap across both Chroma and AI phases)
     if (_isPipelineRunning && (Core.Globals.Now - _pipelineStartTime) > _timeoutLimit)
     {
         HandleTimeoutFallback();
         return;
     }
 
-    // PHASE 2: Wait for Chroma
+    // PHASE 2: Wait for Chroma to finish, then kick off AI API request
     if (_isPipelineRunning && _chromaTask != null && _chromaTask.IsCompleted && _aiTask == null)
     {
+        if (_chromaTask.IsFaulted)
+        {
+            Print("Chroma task faulted. Falling back immediately.");
+            HandleTimeoutFallback();
+            return;
+        }
+
         _aiTask = Task.Run(() => SendApiRequest(_chromaTask.Result));
     }
 
-    // PHASE 3: Reunion
+    // UNIFIED CHECK FOR TIMEOUTS (Re-evaluated here while waiting on the AI task)
+    if (_isPipelineRunning && (Core.Globals.Now - _pipelineStartTime) > _timeoutLimit)
+    {
+        HandleTimeoutFallback();
+        return;
+    }
+
+    // PHASE 3: Reunion (Wait for AI completion)
     if (_isPipelineRunning && _aiTask != null && _aiTask.IsCompleted)
     {
+        if (_aiTask.IsFaulted)
+        {
+            Print("AI task faulted. Executing fallback trade.");
+            HandleTimeoutFallback();
+            return;
+        }
+
         ExecuteScalp7Trade(_aiTask.Result);
         ResetPipeline();
     }
@@ -37,9 +58,9 @@ protected override void OnBarUpdate()
 
 private void HandleTimeoutFallback()
 {
-    Print("Pipeline timed out! Executing fallback strategy.");
+    Print("Pipeline timed out or faulted! Executing fallback strategy.");
     
-    // Fallback: E.g., trade based on simple indicator math instead of AI
+    // Fallback: Trade based on simple indicator math instead of waiting on hanging tasks
     ExecuteSimpleFallbackTrade(); 
     
     ResetPipeline();
