@@ -1,86 +1,125 @@
-private int _activeRequestBarIndex = -1; // Track which bar started the request
+#region Using declarations
+using System;
+using System.Threading.Tasks;
+using NinjaTrader.Cbi;
+using NinjaTrader.NinjaScript;
+using NinjaTrader.Data;
+#endregion
 
-// Inside PHASE 1 (Request Trigger)
-_activeRequestBarIndex = CurrentBar; 
-
-// Inside PHASE 3 (Reunion)
-if (_isPipelineRunning && _aiTask != null && _aiTask.IsCompleted)
+namespace NinjaTrader.NinjaScript.Strategies
 {
-    // Validate: Is this result still relevant to the current market?
-    if (_activeRequestBarIndex == CurrentBar) 
+    public class Step3_TimeoutGuardrail : Strategy
     {
-        ExecuteScalp7Trade(_aiTask.Result);
-    }
-    else 
-    {
-        Print("Stale insight discarded. Bar mismatch.");
-    }
-    ResetPipeline();
-}
+        // Class-level variable declarations
+        private Task<string> _chromaTask;
+        private Task<string> _aiTask;
+        private DateTime _pipelineStartTime;
+        private readonly TimeSpan _timeoutLimit = TimeSpan.FromMilliseconds(400);
+        private bool _isPipelineRunning = false;
 
-
-2. The Circuit Breaker Pattern
-If your API is returning errors (500s or Rate Limits), repeatedly slamming it with requests will likely get your IP banned or crash your local logic. A Circuit Breaker "trips" the circuit when errors exceed a threshold, forcing the strategy into "Safe Mode" for a cooling-off period.
-C#
-
-
-private int _failureCount = 0;
-private readonly int _failureThreshold = 3; // Trip circuit after 3 fails
-private DateTime _circuitTripTime;
-private bool _isCircuitOpen = false;
-
-// Inside PerformAsyncWorkflow (The Background Task)
-private string SendApiRequest(string context)
-{
-    try 
-    {
-        // Network call...
-        return api.GetResponse();
-    }
-    catch (Exception ex)
-    {
-        _failureCount++;
-        if (_failureCount >= _failureThreshold)
+        protected override void OnStateChange()
         {
-            _isCircuitOpen = true;
-            _circuitTripTime = Core.Globals.Now;
+            if (State == State.SetDefaults)
+            {
+                Name = "Step3_TimeoutGuardrail";
+                Calculate = Calculate.OnBarClose;
+                // Other initialization parameters...
+            }
         }
-        throw; // Propagate the error so the main thread knows it failed
-    }
-}
 
+        protected override void OnBarUpdate()
+        {
+            // Ensure we are working on historical/real-time bars safely
+            if (CurrentBar < 20) return;
 
-The Combined "Safe-Mode" Pipeline
-Here is how the OnBarUpdate loop looks with the Circuit Breaker integrated:
-C#
+            // PHASE 1: Kick off Chroma retrieval
+            if (!_isPipelineRunning && _chromaTask == null)
+            {
+                _pipelineStartTime = Core.Globals.Now;
+                _isPipelineRunning = true;
+                _chromaTask = Task.Run(() => GetHistoricalContextFromChroma());
+            }
 
+            // UNIFIED CHECK FOR TIMEOUTS (Enforces 400ms cap across Chroma phase)
+            if (_isPipelineRunning && (Core.Globals.Now - _pipelineStartTime) > _timeoutLimit)
+            {
+                HandleTimeoutFallback();
+                return;
+            }
 
-protected override void OnBarUpdate()
-{
-    // CIRCUIT BREAKER CHECK
-    if (_isCircuitOpen)
-    {
-        // Stay in "Safe Mode" for 60 seconds
-        if ((Core.Globals.Now - _circuitTripTime).TotalSeconds > 60)
-            _isCircuitOpen = false; // Reset circuit
-        else
-            return; // Exit: Strategy operates in "Safe Mode" (no AI)
-    }
+            // PHASE 2: Wait for Chroma to finish, then kick off AI API request
+            if (_isPipelineRunning && _chromaTask != null && _chromaTask.IsCompleted && _aiTask == null)
+            {
+                if (_chromaTask.IsFaulted)
+                {
+                    Print("Chroma task faulted. Falling back immediately.");
+                    HandleTimeoutFallback();
+                    return;
+                }
 
-    // PHASE 1: Kick off
-    if (!_isPipelineRunning && _chromaTask == null)
-    {
-        _pipelineStartTime = Core.Globals.Now;
-        _activeRequestBarIndex = CurrentBar; // Snap the context
-        _isPipelineRunning = true;
-        _chromaTask = Task.Run(() => GetHistoricalContextFromChroma());
-    }
+                _aiTask = Task.Run(() => SendApiRequest(_chromaTask.Result));
+            }
 
-    // ... (Phases 2 & 3 stay similar, but wrap result access in Try/Catch)
-    try {
-        // reunion logic
-    }
-    catch {
-        // Increment _failureCount and reset
+            // UNIFIED CHECK FOR TIMEOUTS (Enforces 400ms cap across AI phase)
+            if (_isPipelineRunning && (Core.Globals.Now - _pipelineStartTime) > _timeoutLimit)
+            {
+                HandleTimeoutFallback();
+                return;
+            }
+
+            // PHASE 3: Reunion (Wait for AI completion)
+            if (_isPipelineRunning && _aiTask != null && _aiTask.IsCompleted)
+            {
+                if (_aiTask.IsFaulted)
+                {
+                    Print("AI task faulted. Executing fallback trade.");
+                    HandleTimeoutFallback();
+                    return;
+                }
+
+                ExecuteScalp7Trade(_aiTask.Result);
+                ResetPipeline();
+            }
+        }
+
+        private string GetHistoricalContextFromChroma()
+        {
+            // Placeholder: Local ChromaDB vector retrieval logic
+            return "ChromaContext_Placeholder";
+        }
+
+        private string SendApiRequest(string context)
+        {
+            // Placeholder: External LLM API request logic
+            return "AI_Parameters_Placeholder";
+        }
+
+        private void ExecuteScalp7Trade(string apiResult)
+        {
+            Print("Executing trade based on AI result: " + apiResult);
+            // Trade execution logic...
+        }
+
+        private void HandleTimeoutFallback()
+        {
+            Print("Pipeline timed out or faulted! Executing fallback strategy.");
+            
+            // Fallback: Trade based on simple indicator math instead of waiting on hanging tasks
+            ExecuteSimpleFallbackTrade(); 
+            
+            ResetPipeline();
+        }
+
+        private void ExecuteSimpleFallbackTrade()
+        {
+            // Placeholder: Fallback indicator-based execution logic
+        }
+
+        private void ResetPipeline()
+        {
+            _chromaTask = null;
+            _aiTask = null;
+            _isPipelineRunning = false;
+        }
     }
 }
